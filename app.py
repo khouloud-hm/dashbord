@@ -147,6 +147,9 @@ colonnes_equipement = [c for c in colonnes_identification_brutes if c != "WS_NAM
 
 # ── Liberté de choix : l'utilisateur décide par quelle colonne grouper les
 #    courbes (cellule, BTS, site...), au lieu de laisser le code deviner. ──
+if "entites_exclues" not in st.session_state:
+    st.session_state.entites_exclues = set()
+
 with st.sidebar:
     if colonnes_equipement:
         st.divider()
@@ -212,8 +215,34 @@ else:
     col_entite = None
     cellules = []
     FORMAT = "A"
+with st.sidebar:
+    if has_lncel and cellules:
+        st.divider()
+        st.markdown("### ❌ Masquer des courbes")
+        entites_visibles = st.multiselect(
+            "Courbes affichées (cliquer la croix pour retirer)",
+            options=cellules,
+            default=[c for c in cellules if c not in st.session_state.entites_exclues],
+            key="multiselect_entites_visibles",
+            help="Retirez une entité du multiselect pour la masquer du graphique."
+        )
+        st.session_state.entites_exclues = set(cellules) - set(entites_visibles)
 
-
+        # ── Restauration rapide des courbes masquées ────────────────────────
+        masquees_actuelles = sorted(st.session_state.entites_exclues, key=str)
+        if masquees_actuelles:
+            with st.expander(f"↺ Courbes masquées ({len(masquees_actuelles)})", expanded=False):
+                for ent_masquee in masquees_actuelles:
+                    col_nom, col_btn = st.columns([3, 1])
+                    with col_nom:
+                        st.caption(ent_masquee)
+                    with col_btn:
+                        if st.button("↺", key=f"restaurer_{ent_masquee}", help=f"Restaurer {ent_masquee}"):
+                            st.session_state.entites_exclues.discard(ent_masquee)
+                            st.rerun()
+                if st.button("↺ Tout restaurer", key="restaurer_tout", use_container_width=True):
+                    st.session_state.entites_exclues = set()
+                    st.rerun()
 # ─────────────────────────────────────────────────────────────────────────────
 # Détection des groupes WS_NAME (TDD / FDD)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,14 +304,25 @@ with st.sidebar:
             )
         )
         st.caption("Chaque réseau est tracé en couche séparée sur le même graphique.")
+
+        ws_focus = None
+        if len(ws_selectionnes) >= 2:
+            ws_focus = st.radio(
+                "🔍 Zoom auto sur un réseau",
+                ["Échelle commune"] + ws_selectionnes,
+                index=0,
+                format_func=lambda w: ws_labels.get(w, w) if w != "Échelle commune" else w,
+                horizontal=True,
+                key="ws_focus_radio"
+            )
+            if ws_focus == "Échelle commune":
+                ws_focus = None
     else:
         ws_selectionnes = []
+        ws_focus = None
 
-    # FIX: build ws_axis_map here (was already correct, kept as-is)
-    ws_axis_map = {}
-    if ws_groups and ws_selectionnes:
-        for i, w in enumerate(ws_selectionnes):
-            ws_axis_map[w] = "y" if i == 0 else "y2"
+    # Un seul axe Y partagé pour tous les réseaux — plus de y2
+    ws_axis_map = {w: "y" for w in ws_selectionnes} if ws_groups else {}
 
     st.divider()
     st.markdown("### 🎛️ Options")
@@ -304,12 +344,34 @@ with st.sidebar:
     date_max = df[DATE_COL].max().date()
     intervalles = df[DATE_COL].drop_duplicates().sort_values().diff().dropna()
     granularite_horaire = bool(len(intervalles) and intervalles.min() < pd.Timedelta(days=1))
-    date_debut = st.date_input(
-        "Date début", value=date_min, min_value=date_min, max_value=date_max, key="date_debut"
-    )
-    date_fin = st.date_input(
-        "Date fin", value=date_max, min_value=date_min, max_value=date_max, key="date_fin"
-    )
+
+    # Mémorise les bornes d'origine du fichier (par fichier+feuille) pour
+    # pouvoir les restaurer même après que l'utilisateur a changé les dates
+    cle_bornes = f"bornes_origine_{nom_actif}_{feuille}"
+    if cle_bornes not in st.session_state:
+        st.session_state[cle_bornes] = (date_min, date_max)
+
+    # Initialise les valeurs des widgets uniquement si elles n'existent pas
+    # encore (évite le conflit Streamlit value= vs session_state)
+    if "date_debut" not in st.session_state:
+        st.session_state["date_debut"] = date_min
+    if "date_fin" not in st.session_state:
+        st.session_state["date_fin"] = date_max
+
+    col_dates, col_reset = st.columns([4, 1])
+    with col_reset:
+        st.write("")
+        if st.button("↺", help="Revenir à la fenêtre temporelle d'origine du fichier"):
+            st.session_state["date_debut"], st.session_state["date_fin"] = st.session_state[cle_bornes]
+            st.rerun()
+
+    with col_dates:
+        date_debut = st.date_input(
+            "Date début", min_value=date_min, max_value=date_max, key="date_debut"
+        )
+        date_fin = st.date_input(
+            "Date fin", min_value=date_min, max_value=date_max, key="date_fin"
+        )
 
     st.divider()
     st.markdown("### 📍 Curseurs verticaux (repères)")
@@ -385,7 +447,7 @@ if FORMAT == "B" and cellules:
         st.info(f"📌 **{cellule_active}** — courbe isolée · Cliquer **✦ Tous** pour revenir")
         entites_plot = [cellule_active]
     else:
-        entites_plot = cellules
+        entites_plot = [c for c in cellules if c not in st.session_state.entites_exclues]
 
 else:
     entites_plot   = []
@@ -573,17 +635,33 @@ for idx, kpi in enumerate(kpis_choisis):
 
         unite = kpi_units.get(kpi, "")
 
-        # FIX: decide dual-axis from ws_selectionnes, not from ranges_par_axe keys
-        deux_reseaux = bool(ws_groups) and len(ws_selectionnes) >= 2
-        label_axe_y  = ws_labels.get(ws_selectionnes[0], ws_selectionnes[0]) if deux_reseaux else ""
-        label_axe_y2 = ws_labels.get(ws_selectionnes[1], ws_selectionnes[1]) if deux_reseaux else ""
-        couleur_axe_y  = ws_color_map.get(ws_selectionnes[0], "#111111") if deux_reseaux else "#111111"
-        couleur_axe_y2 = ws_color_map.get(ws_selectionnes[1], "#111111") if deux_reseaux else "#111111"
+        # Plus de double axe — un seul axe Y partagé pour toutes les courbes
+        deux_reseaux = False
+        label_axe_y  = ""
+        couleur_axe_y = "#111111" if deux_reseaux else "#111111"
 
         # ── Auto-échelle TOUJOURS dynamique : Plotly recalcule l'échelle à
         # partir des seules courbes (+ leur marge invisible associée) qui
         # sont effectivement visibles, donc l'isolement via la légende
         # déclenche automatiquement le bon zoom, sans action manuelle.
+        # Bornes Y "souples" : un peu plus larges que les vraies valeurs min/max,
+        # pour permettre un zoom confortable sans pouvoir s'éloigner indéfiniment
+        toutes_valeurs_y = []
+        for tv in traces_valeurs:
+            if not tv.empty:
+                toutes_valeurs_y.append(tv[kpi])
+        if toutes_valeurs_y:
+            vals_concat = pd.concat(toutes_valeurs_y).dropna()
+            y_min_data, y_max_data = float(vals_concat.min()), float(vals_concat.max())
+            span_y = y_max_data - y_min_data
+            marge_limite = span_y * 0.5 if span_y > 0 else (abs(y_max_data) * 0.2 if y_max_data != 0 else 1)
+            y_min_allowed = y_min_data - marge_limite
+            y_max_allowed = y_max_data + marge_limite
+            if y_min_data >= 0:
+                y_min_allowed = max(0, y_min_allowed)
+        else:
+            y_min_allowed, y_max_allowed = None, None
+
         yaxis_cfg = dict(
             gridcolor="#E5E7EB",
             title=dict(
@@ -596,28 +674,51 @@ for idx, kpi in enumerate(kpis_choisis):
             zeroline=False,
             autorange=True,
         )
+        if y_min_allowed is not None:
+            yaxis_cfg["minallowed"] = y_min_allowed
+            yaxis_cfg["maxallowed"] = y_max_allowed
 
-        yaxis2_cfg = None
-        if deux_reseaux:
-            yaxis2_cfg = dict(
-                overlaying="y",
-                side="right",
-                showgrid=False,
-                title=dict(
-                    text=f"{unite} {label_axe_y2}".strip(),
-                    font=dict(size=13, color=couleur_axe_y2),
-                    standoff=10,
-                ),
-                tickfont=dict(color="#111111"),
-                linecolor="#111111",
-                zeroline=False,
-                autorange=True,
-            )
+        # Si un réseau est isolé via le radio "Zoom auto", on force le range Y
+        # à partir des seules valeurs de ce réseau (au lieu de toutes les courbes)
+        if ws_focus and "WS_NAME" in df_plot.columns:
+            vals_focus = df_plot.loc[
+                df_plot["WS_NAME"].astype(str).str.strip() == ws_focus, kpi
+            ].dropna()
+            if not vals_focus.empty:
+                vmin, vmax = float(vals_focus.min()), float(vals_focus.max())
+                span = vmax - vmin
+                pad = span * (marge_y / 100) if span > 0 else (abs(vmax) * 0.1 if vmax != 0 else 1)
+                y_lo, y_hi = vmin - pad, vmax + pad
+                if vmin >= 0:
+                    y_lo = max(0, y_lo)
+                yaxis_cfg["range"] = [y_lo, y_hi]
+                yaxis_cfg["autorange"] = False
+
+        # Bornes réelles de l'axe X — calculées à partir des SEULES courbes
+        # effectivement tracées pour ce KPI (pas du dataframe global), afin
+        # que l'axe ne dépasse jamais les vraies dates du fichier
+        toutes_dates = []
+        for tv in traces_valeurs:
+            if not tv.empty:
+                toutes_dates.append(tv[DATE_COL])
+        if toutes_dates:
+            dates_concat = pd.concat(toutes_dates)
+            x_min_reel, x_max_reel = dates_concat.min(), dates_concat.max()
+        else:
+            dates_reelles = df_plot[DATE_COL].dropna()
+            if not dates_reelles.empty:
+                x_min_reel, x_max_reel = dates_reelles.min(), dates_reelles.max()
+            else:
+                x_min_reel, x_max_reel = pd.Timestamp(date_debut), pd.Timestamp(date_fin)
 
         xaxis_cfg = dict(
             gridcolor="#E5E7EB",
             title="",
             type="date",
+            range=[x_min_reel, x_max_reel],
+            autorange=False,
+            minallowed=x_min_reel,   # bloque le pan/zoom avant la première date du fichier
+            maxallowed=x_max_reel,   # bloque le pan/zoom après la dernière date du fichier
             tickangle=-45,
             showticklabels=True,
             tickfont=dict(color="#111111", size=10),
@@ -631,9 +732,8 @@ for idx, kpi in enumerate(kpis_choisis):
                 dict(dtickrange=[86400000, None],       value="%d.%m.%Y"),
             ],
         )
-
-        marge_droite = 260 if yaxis2_cfg else 200
-        legend_x     = 1.20 if yaxis2_cfg else 1.01
+        marge_droite = 200
+        legend_x     = 1.01
 
         fig.update_layout(
             title=dict(text=titre, font=dict(size=20, color="#005AFF"), x=0.5, xanchor="center"),
@@ -643,6 +743,7 @@ for idx, kpi in enumerate(kpis_choisis):
             hovermode="closest",
             paper_bgcolor="#FFFFFF",
             plot_bgcolor="#FFFFFF",
+            uirevision=f"{kpi}_{date_debut}_{date_fin}",  # force le reset du zoom si les filtres changent
             xaxis=xaxis_cfg,
             yaxis=yaxis_cfg,
             legend=dict(
@@ -657,9 +758,6 @@ for idx, kpi in enumerate(kpis_choisis):
                 itemdoubleclick="toggle"
             )
         )
-        if yaxis2_cfg:
-            fig.update_layout(yaxis2=yaxis2_cfg)
-
         if afficher_topworst_lignes and reseau_ambigu:
             st.caption("⚠️ Sélectionnez **un seul** réseau (TDD ou FDD) dans la barre latérale "
                        "pour activer les repères Meilleur/Pire sur ce graphique.")
@@ -726,10 +824,10 @@ for idx, kpi in enumerate(kpis_choisis):
             config={
                 "scrollZoom": True,
                 "displaylogo": False,
-                "modeBarButtonsToRemove": ["lasso2d", "select2d"]
+                "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                "doubleClick": "autosize"
             }
         )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Export

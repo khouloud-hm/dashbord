@@ -100,6 +100,25 @@ with st.sidebar:
 df_raw = pd.read_excel(fichier_actif, sheet_name=feuille)
 df_raw.columns = df_raw.columns.astype(str).str.strip()
 
+# Sécurité : si le fichier contient des colonnes en double (même nom répété),
+# pandas renvoie un DataFrame au lieu d'une Series pour df[col], ce qui fait
+# crasher tout le traitement en aval. On renomme les doublons (KPI (2), KPI (3)...)
+if df_raw.columns.duplicated().any():
+    compteurs = {}
+    nouvelles_colonnes = []
+    for c in df_raw.columns:
+        if c in compteurs:
+            compteurs[c] += 1
+            nouvelles_colonnes.append(f"{c} ({compteurs[c]})")
+        else:
+            compteurs[c] = 1
+            nouvelles_colonnes.append(c)
+    df_raw.columns = nouvelles_colonnes
+    st.warning(
+        "⚠️ Le fichier contient des colonnes en double — elles ont été "
+        "renommées automatiquement (ex: 'KPI (2)') pour éviter tout conflit."
+    )
+
 kpi_units = {}
 try:
     for sheet in xls.sheet_names:
@@ -125,13 +144,24 @@ except Exception:
 
 DATE_COL = "Period start time"
 
+if DATE_COL not in df_raw.columns:
+    st.error(
+        f"❌ La colonne '{DATE_COL}' est introuvable dans la feuille « {feuille} ». "
+        "Vérifiez que c'est bien un export Nokia standard, ou choisissez une autre feuille."
+    )
+    st.stop()
+
+if len(df_raw) < 2:
+    st.error(
+        f"❌ La feuille « {feuille} » ne contient pas assez de lignes "
+        "(il faut l'en-tête + la ligne technique + au moins une ligne de données). "
+        "Ce fichier semble vide ou mal exporté."
+    )
+    st.stop()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Détection des colonnes d'identification via la LIGNE GRISE (ligne juste
-# sous l'en-tête) : elle est toujours VIDE pour les colonnes d'identification
-# (Period start time, MRBTS/NRBTS/LNBTS name, NRCEL/LNCEL name, WS_NAME) et
-# toujours REMPLIE d'un code technique (ex: "NR_5150A") pour les colonnes KPI.
-# C'est la frontière fiable entre identification et KPI, peu importe le nom
-# des colonnes ou la techno (4G/5G/3G).
+# sous l'en-tête) : ...
 # ─────────────────────────────────────────────────────────────────────────────
 ligne_marqueur = df_raw.iloc[0]
 
@@ -486,6 +516,13 @@ df_plot = df[
     (df[DATE_COL].dt.date >= date_debut) &
     (df[DATE_COL].dt.date <= date_fin)
 ].copy()
+
+if df_plot.empty:
+    st.warning(
+        "⚠️ Aucune donnée dans la fenêtre temporelle sélectionnée "
+        f"({date_debut} → {date_fin}). Élargissez la plage de dates dans la barre latérale."
+    )
+    st.stop()
 
 
 def ajouter_padding_invisible(fig, sub, kpi, axe, legendgroup, marge_y):

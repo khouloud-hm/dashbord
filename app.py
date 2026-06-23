@@ -351,11 +351,17 @@ with st.sidebar:
     if cle_bornes not in st.session_state:
         st.session_state[cle_bornes] = (date_min, date_max)
 
-    # Initialise les valeurs des widgets uniquement si elles n'existent pas
-    # encore (évite le conflit Streamlit value= vs session_state)
-    if "date_debut" not in st.session_state:
+    # Initialise OU recadre les valeurs des widgets si elles sont absentes ou
+    # tombent hors de la plage du fichier actuellement chargé (ex: changement
+    # de fichier/feuille) — évite le crash StreamlitAPIException
+    if ("date_debut" not in st.session_state
+            or st.session_state["date_debut"] < date_min
+            or st.session_state["date_debut"] > date_max):
         st.session_state["date_debut"] = date_min
-    if "date_fin" not in st.session_state:
+
+    if ("date_fin" not in st.session_state
+            or st.session_state["date_fin"] < date_min
+            or st.session_state["date_fin"] > date_max):
         st.session_state["date_fin"] = date_max
 
     col_dates, col_reset = st.columns([4, 1])
